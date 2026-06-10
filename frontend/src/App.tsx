@@ -138,6 +138,67 @@ export default function App() {
   const [pluggyAliasInput, setPluggyAliasInput] = useState<{ account_id: string; alias: string }>({ account_id: '', alias: '' });
   const [pluggySyncInput, setPluggySyncInput] = useState<{ item_ids: string; account_type: string; date_from: string; date_to: string }>({ item_ids: '', account_type: '', date_from: `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-01`, date_to: new Date().toISOString().slice(0, 10) });
   const [pluggyStatusMessage, setPluggyStatusMessage] = useState('');
+  const [cards, setCards] = useState<Card[]>([]);
+  const [newCard, setNewCard] = useState({ name: '', closing_day: 1, due_day: 1 });
+
+  const cacheScope = authToken ? `finance_cache_v1:${API_BASE}:${authToken.slice(0, 24)}` : '';
+  const cacheKey = (name: string, variant = '') => `${cacheScope}:${name}:${variant}`;
+  const transactionCacheVariant = `${transactionFilterMonth || 'all'}:${transactionFilterCategory || 'all'}:${transactionFilterPaymentMethod || 'all'}:${transactionFilterFixed}`;
+  const dashboardCacheVariant = `${showAllMonths ? 'all' : selectedMonth}`;
+
+  const readCache = <T,>(name: string, variant = ''): T | null => {
+    if (!cacheScope) return null;
+    try {
+      const raw = localStorage.getItem(cacheKey(name, variant));
+      return raw ? JSON.parse(raw).value as T : null;
+    } catch (err) {
+      return null;
+    }
+  };
+
+  const writeCache = (name: string, variant: string, value: unknown) => {
+    if (!cacheScope) return;
+    try {
+      localStorage.setItem(cacheKey(name, variant), JSON.stringify({ saved_at: Date.now(), value }));
+    } catch (err) {
+      console.warn('Cache local cheio ou indisponivel.', err);
+    }
+  };
+
+  const hydrateFromCache = () => {
+    const cachedTransactions = readCache<Transaction[]>('transactions', transactionCacheVariant);
+    const cachedDashboard = readCache<{ dashboard: DashboardData | null; monthly: typeof monthlySummary }>('dashboard', dashboardCacheVariant);
+    const cachedBudgets = readCache<Budget[]>('budgets', selectedMonth);
+    const cachedGoals = readCache<Goal[]>('goals');
+    const cachedCategories = readCache<string[]>('categories');
+    const cachedSalaryPlan = readCache<SalaryPlan | null>('salary-plan');
+    const cachedProvisions = readCache<Provision[]>('provisions');
+    const cachedCards = readCache<Card[]>('cards');
+    const cachedMtdAnalytics = readCache<any>('mtd-analytics', selectedMonth);
+    const cachedCategoryRules = readCache<typeof categoryRules>('category-rules');
+    const cachedPurchaseSimulations = readCache<any[]>('purchase-simulations');
+    const cachedForecasting = readCache<typeof forecastingData>('forecasting', selectedMonth);
+    const cachedPluggyStatus = readCache<any>('pluggy-status');
+    const cachedPluggyAliases = readCache<typeof pluggyAccountAliases>('pluggy-account-aliases');
+
+    if (cachedTransactions) setTransactions(cachedTransactions);
+    if (cachedDashboard) {
+      setDashboardData(cachedDashboard.dashboard);
+      setMonthlySummary(cachedDashboard.monthly);
+    }
+    if (cachedBudgets) setBudgets(cachedBudgets);
+    if (cachedGoals) setGoals(cachedGoals);
+    if (cachedCategories) setCategories(cachedCategories);
+    if (cachedSalaryPlan) setSalaryPlan(cachedSalaryPlan);
+    if (cachedProvisions) setProvisions(cachedProvisions);
+    if (cachedCards) setCards(cachedCards);
+    if (cachedMtdAnalytics) setMtdAnalytics(cachedMtdAnalytics);
+    if (cachedCategoryRules) setCategoryRules(cachedCategoryRules);
+    if (cachedPurchaseSimulations) setPurchaseSimulations(cachedPurchaseSimulations);
+    if (cachedForecasting) setForecastingData(cachedForecasting);
+    if (cachedPluggyStatus) setPluggyStatus(cachedPluggyStatus);
+    if (cachedPluggyAliases) setPluggyAccountAliases(cachedPluggyAliases);
+  };
 
   const fetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const headers = new Headers(init.headers || {});
@@ -194,19 +255,18 @@ export default function App() {
       const res = await fetch(url);
       const data = await res.json();
       setTransactions(data);
+      writeCache('transactions', transactionCacheVariant, data);
     } catch (err) {
       console.error('Erro ao buscar transações:', err);
     }
   };
 
   // Exemplo de componente para gerenciar cartões
-const [cards, setCards] = useState<Card[]>([]);
-const [newCard, setNewCard] = useState({ name: '', closing_day: 1, due_day: 1 });
-
 const fetchCards = async () => {
     const res = await fetch(`${API_BASE}/api/cards`);
     const data = await res.json();
     setCards(data);
+    writeCache('cards', '', data);
 };
 
 const handleAddCard = async (e: React.FormEvent) => {
@@ -254,19 +314,19 @@ const handleAddCard = async (e: React.FormEvent) => {
       const monthly = await monthlyRes.json() as Record<string, { income: number; expense: number; balance: number; projected_balance?: number; carryover_balance?: number; residual_debt?: number }>;
 
       setDashboardData(dashboard);
-      setMonthlySummary(
-        Object.entries(monthly)
-          .map(([month, values]) => ({
-            month,
-            income: values.income,
-            expense: values.expense,
-            balance: values.balance,
-            projected_balance: values.projected_balance ?? values.income - values.expense,
-            carryover_balance: values.carryover_balance ?? values.balance,
-            residual_debt: values.residual_debt ?? 0,
-          }))
-          .sort((a, b) => a.month.localeCompare(b.month))
-      );
+      const monthlySummaryData = Object.entries(monthly)
+        .map(([month, values]) => ({
+          month,
+          income: values.income,
+          expense: values.expense,
+          balance: values.balance,
+          projected_balance: values.projected_balance ?? values.income - values.expense,
+          carryover_balance: values.carryover_balance ?? values.balance,
+          residual_debt: values.residual_debt ?? 0,
+        }))
+        .sort((a, b) => a.month.localeCompare(b.month));
+      setMonthlySummary(monthlySummaryData);
+      writeCache('dashboard', dashboardCacheVariant, { dashboard, monthly: monthlySummaryData });
     } catch (err) {
       console.error('Erro ao buscar dashboard:', err);
       setDashboardData(null);
@@ -281,6 +341,7 @@ const handleAddCard = async (e: React.FormEvent) => {
       const res = await fetch(`${API_BASE}/api/budgets?month=${selectedMonth}`);
       const data = await res.json();
       setBudgets(data);
+      writeCache('budgets', selectedMonth, data);
     } catch (err) {
       console.error('Erro ao buscar orçamentos:', err);
     }
@@ -291,6 +352,7 @@ const handleAddCard = async (e: React.FormEvent) => {
       const res = await fetch(`${API_BASE}/api/goals`);
       const data = await res.json();
       setGoals(data);
+      writeCache('goals', '', data);
     } catch (err) {
       console.error('Erro ao buscar metas:', err);
     }
@@ -302,6 +364,7 @@ const handleAddCard = async (e: React.FormEvent) => {
       const data = await res.json();
       const names = data.map((item: { name: string }) => item.name);
       setCategories(names);
+      writeCache('categories', '', names);
       if (!names.includes(newTransaction.category)) {
         setNewTransaction(prev => ({ ...prev, category: names[0] || 'Outros' }));
       }
@@ -318,6 +381,7 @@ const handleAddCard = async (e: React.FormEvent) => {
       const res = await fetch(`${API_BASE}/api/salary-plan`);
       const data = await res.json();
       setSalaryPlan(data);
+      writeCache('salary-plan', '', data);
       setSalaryInput(prev => ({
         ...prev,
         effective_date: data.effective_date || prev.effective_date,
@@ -334,6 +398,7 @@ const handleAddCard = async (e: React.FormEvent) => {
       const res = await fetch(`${API_BASE}/api/provisions`);
       const data = await res.json();
       setProvisions(data);
+      writeCache('provisions', '', data);
     } catch (err) {
       console.error('Erro ao buscar provisões:', err);
     }
@@ -344,6 +409,7 @@ const handleAddCard = async (e: React.FormEvent) => {
       const res = await fetch(`${API_BASE}/api/mtd-analytics?month=${selectedMonth}`);
       const data = await res.json();
       setMtdAnalytics(data);
+      writeCache('mtd-analytics', selectedMonth, data);
     } catch (err) {
       console.error('Erro ao buscar MTD analytics:', err);
     }
@@ -354,6 +420,7 @@ const handleAddCard = async (e: React.FormEvent) => {
       const res = await fetch(`${API_BASE}/api/category-rules`);
       const data = await res.json();
       setCategoryRules(data);
+      writeCache('category-rules', '', data);
     } catch (err) {
       console.error('Erro ao buscar regras de categorização:', err);
     }
@@ -364,6 +431,7 @@ const handleAddCard = async (e: React.FormEvent) => {
       const res = await fetch(`${API_BASE}/api/purchase-simulations`);
       const data = await res.json();
       setPurchaseSimulations(data);
+      writeCache('purchase-simulations', '', data);
     } catch (err) {
       console.error('Erro ao buscar simulações:', err);
     }
@@ -374,6 +442,7 @@ const handleAddCard = async (e: React.FormEvent) => {
       const res = await fetch(`${API_BASE}/api/forecasting?months=12&start_month=${selectedMonth}`);
       const data = await res.json();
       setForecastingData(data);
+      writeCache('forecasting', selectedMonth, data);
     } catch (err) {
       console.error('Erro ao buscar forecasting:', err);
     }
@@ -384,6 +453,7 @@ const handleAddCard = async (e: React.FormEvent) => {
       const res = await fetch(`${API_BASE}/api/pluggy/status`);
       const data = await res.json();
       setPluggyStatus(data);
+      writeCache('pluggy-status', '', data);
     } catch (err) {
       console.error('Erro ao buscar status Pluggy:', err);
     }
@@ -413,6 +483,7 @@ const handleAddCard = async (e: React.FormEvent) => {
       const res = await fetch(`${API_BASE}/api/pluggy/account-aliases`);
       const data = await res.json();
       setPluggyAccountAliases(Array.isArray(data) ? data : []);
+      writeCache('pluggy-account-aliases', '', Array.isArray(data) ? data : []);
     } catch (err) {
       console.error('Erro ao buscar aliases Pluggy:', err);
     }
@@ -621,9 +692,16 @@ const handleAddCard = async (e: React.FormEvent) => {
   };
 
   useEffect(() => {
+    if (authToken) {
+      hydrateFromCache();
+    }
+  }, [authToken, selectedMonth, showAllMonths, transactionFilterMonth, transactionFilterCategory, transactionFilterPaymentMethod, transactionFilterFixed]);
+
+  useEffect(() => {
     if (!authChecked || (authRequired && !authToken)) {
       return;
     }
+    hydrateFromCache();
     fetchTransactions();
     fetchDashboard();
     fetchBudgets();
@@ -1009,7 +1087,7 @@ const handleAddCard = async (e: React.FormEvent) => {
   const bestPurchaseDay = purchaseCalendarDays.reduce((best, item) => item.worstBalance > best.worstBalance ? item : best, purchaseCalendarDays[0]);
   const worstPurchaseDay = purchaseCalendarDays.reduce((worst, item) => item.worstBalance < worst.worstBalance ? item : worst, purchaseCalendarDays[0]);
 
-  if (!authChecked) {
+  if (!authChecked && !authToken) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center">
         <p className="text-sm text-slate-400">Carregando...</p>
