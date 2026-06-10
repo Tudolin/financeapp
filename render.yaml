@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: finance-backend
+    runtime: docker
+    rootDir: backend
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: AUTH_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        sync: false
+      - key: PLUGGY_BASE_URL
+        value: https://api.pluggy.ai
+      - key: PLUGGY_CLIENT_ID
+        sync: false
+      - key: PLUGGY_CLIENT_SECRET
+        sync: false
+      - key: PLUGGY_API_KEY
+        sync: false
+      - key: PLUGGY_ITEM_IDS
+        sync: false

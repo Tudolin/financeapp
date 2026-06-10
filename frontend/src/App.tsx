@@ -86,6 +86,13 @@ interface Card {
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 export default function App() {
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem('finance_auth_token') || '');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authRequired, setAuthRequired] = useState(true);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authError, setAuthError] = useState('');
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null);
@@ -132,6 +139,48 @@ export default function App() {
   const [pluggySyncInput, setPluggySyncInput] = useState<{ item_ids: string; account_type: string; date_from: string; date_to: string }>({ item_ids: '', account_type: '', date_from: `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-01`, date_to: new Date().toISOString().slice(0, 10) });
   const [pluggyStatusMessage, setPluggyStatusMessage] = useState('');
 
+  const fetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const headers = new Headers(init.headers || {});
+    if (authToken) {
+      headers.set('Authorization', `Bearer ${authToken}`);
+    }
+    const response = await window.fetch(input, { ...init, headers });
+    if (response.status === 401) {
+      localStorage.removeItem('finance_auth_token');
+      setAuthToken('');
+      setAuthMode('login');
+      setAuthRequired(true);
+    }
+    return response;
+  };
+
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    try {
+      const res = await window.fetch(`${API_BASE}/api/auth/${authMode}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: authEmail, password: authPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAuthError(data.detail || 'Erro ao autenticar.');
+        return;
+      }
+      localStorage.setItem('finance_auth_token', data.token);
+      setAuthToken(data.token);
+      setAuthRequired(true);
+    } catch (err) {
+      setAuthError('Erro ao conectar com o backend.');
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('finance_auth_token');
+    setAuthToken('');
+  };
+
   const fetchTransactions = async () => {
     try {
       const params = new URLSearchParams();
@@ -170,6 +219,27 @@ const handleAddCard = async (e: React.FormEvent) => {
     setNewCard({ name: '', closing_day: 1, due_day: 1 });
     fetchCards();
 };
+
+  useEffect(() => {
+    const checkAuth = async () => {
+      try {
+        const headers = authToken ? { Authorization: `Bearer ${authToken}` } : undefined;
+        const res = await window.fetch(`${API_BASE}/api/auth/status`, { headers });
+        const data = await res.json();
+        if (!data.has_user || (authToken && !data.authenticated)) {
+          localStorage.removeItem('finance_auth_token');
+          setAuthToken('');
+        }
+        setAuthRequired(true);
+        setAuthMode(data.has_user ? 'login' : 'register');
+      } catch (err) {
+        setAuthRequired(true);
+      } finally {
+        setAuthChecked(true);
+      }
+    };
+    checkAuth();
+  }, [authToken]);
 
   const fetchDashboard = async () => {
     setLoadingDashboard(true);
@@ -551,6 +621,9 @@ const handleAddCard = async (e: React.FormEvent) => {
   };
 
   useEffect(() => {
+    if (!authChecked || (authRequired && !authToken)) {
+      return;
+    }
     fetchTransactions();
     fetchDashboard();
     fetchBudgets();
@@ -565,7 +638,7 @@ const handleAddCard = async (e: React.FormEvent) => {
     fetchForecasting();
     fetchPluggyStatus();
     fetchPluggyAccountAliases();
-  }, [selectedMonth, showAllMonths, transactionFilterMonth, transactionFilterCategory, transactionFilterPaymentMethod, transactionFilterFixed]);
+  }, [authChecked, authRequired, authToken, selectedMonth, showAllMonths, transactionFilterMonth, transactionFilterCategory, transactionFilterPaymentMethod, transactionFilterFixed]);
 
   const handleFileUpload = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -936,6 +1009,50 @@ const handleAddCard = async (e: React.FormEvent) => {
   const bestPurchaseDay = purchaseCalendarDays.reduce((best, item) => item.worstBalance > best.worstBalance ? item : best, purchaseCalendarDays[0]);
   const worstPurchaseDay = purchaseCalendarDays.reduce((worst, item) => item.worstBalance < worst.worstBalance ? item : worst, purchaseCalendarDays[0]);
 
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center">
+        <p className="text-sm text-slate-400">Carregando...</p>
+      </div>
+    );
+  }
+
+  if (authRequired && !authToken) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center px-6">
+        <div className="w-full max-w-sm rounded-lg border border-slate-700 bg-slate-900 p-6">
+          <h1 className="text-xl font-bold">{authMode === 'register' ? 'Criar acesso' : 'Entrar'}</h1>
+          <p className="mt-1 text-sm text-slate-400">
+            {authMode === 'register' ? 'Cadastre o primeiro usuario para proteger seus dados.' : 'Acesse para ver suas informacoes financeiras.'}
+          </p>
+          <form onSubmit={handleAuthSubmit} className="mt-6 space-y-4">
+            <input
+              type="email"
+              value={authEmail}
+              onChange={e => setAuthEmail(e.target.value)}
+              placeholder="email"
+              required
+              className="w-full rounded border border-slate-600 bg-slate-950 p-3 text-sm focus:border-blue-400 focus:outline-none"
+            />
+            <input
+              type="password"
+              value={authPassword}
+              onChange={e => setAuthPassword(e.target.value)}
+              placeholder="senha"
+              required
+              minLength={6}
+              className="w-full rounded border border-slate-600 bg-slate-950 p-3 text-sm focus:border-blue-400 focus:outline-none"
+            />
+            {authError && <p className="text-sm text-red-300">{authError}</p>}
+            <button type="submit" className="w-full rounded bg-blue-600 py-3 text-sm font-bold text-white hover:bg-blue-500">
+              {authMode === 'register' ? 'CRIAR ACESSO' : 'ENTRAR'}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-slate-100 font-sans">
       <header className="bg-slate-950 border-b border-slate-700/50 sticky top-0 z-50">
@@ -944,9 +1061,16 @@ const handleAddCard = async (e: React.FormEvent) => {
             <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">Finance App</h1>
             <p className="text-xs text-slate-400 mt-1">Gestor Financeiro Local</p>
           </div>
-          <div className="text-xs text-emerald-400 flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-            Backend Conectado
+          <div className="flex items-center gap-4">
+            <div className="text-xs text-emerald-400 flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+              Backend Conectado
+            </div>
+            {authToken && (
+              <button type="button" onClick={handleLogout} className="rounded border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:bg-slate-800">
+                Sair
+              </button>
+            )}
           </div>
         </div>
         <nav className="max-w-7xl mx-auto px-6 flex gap-1 border-t border-slate-700/50 overflow-x-auto">
