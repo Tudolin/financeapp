@@ -60,6 +60,7 @@ DEFAULT_DB_PATH = "/app/data/finance.db" if os.path.isdir("/app") else os.path.j
 DB_PATH = os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)
 PLUGGY_BASE_URL = os.getenv("PLUGGY_BASE_URL", "https://api.pluggy.ai").rstrip("/")
 AUTH_SECRET = os.getenv("AUTH_SECRET") or os.getenv("SECRET_KEY") or "local-dev-secret-change-me"
+PLUGGY_API_KEY_CACHE = {"value": "", "expires_at": None}
 PUBLIC_API_PATHS = {
     "/api/health",
     "/api/auth/status",
@@ -116,6 +117,11 @@ def users_count() -> int:
         return count
     except Exception:
         return 0
+
+
+def env_value(name: str, default: str = "") -> str:
+    value = os.getenv(name, default)
+    return value.strip().strip('"').strip("'")
 
 # Categorias padrão do sistema
 DEFAULT_CATEGORIES = [
@@ -810,13 +816,20 @@ def auth_login(payload: AuthSchema):
     return {"token": create_auth_token(user), "user": user}
 
 
-def get_pluggy_api_key() -> str:
-    api_key = os.getenv("PLUGGY_API_KEY", "").strip()
-    if api_key:
+def get_pluggy_api_key(force_auth: bool = False) -> str:
+    api_key = env_value("PLUGGY_API_KEY")
+    if api_key and not force_auth:
+        if api_key.lower().startswith("bearer "):
+            api_key = api_key.split(" ", 1)[1].strip()
         return api_key
 
-    client_id = os.getenv("PLUGGY_CLIENT_ID", "").strip()
-    client_secret = os.getenv("PLUGGY_CLIENT_SECRET", "").strip()
+    cached_key = PLUGGY_API_KEY_CACHE.get("value")
+    expires_at = PLUGGY_API_KEY_CACHE.get("expires_at")
+    if cached_key and expires_at and datetime.now() < expires_at:
+        return cached_key
+
+    client_id = env_value("PLUGGY_CLIENT_ID")
+    client_secret = env_value("PLUGGY_CLIENT_SECRET")
     if not client_id or not client_secret:
         raise HTTPException(status_code=400, detail="Configure PLUGGY_API_KEY or PLUGGY_CLIENT_ID/PLUGGY_CLIENT_SECRET")
 
@@ -836,6 +849,8 @@ def get_pluggy_api_key() -> str:
     api_key = data.get("apiKey") or data.get("accessToken") or data.get("token")
     if not api_key:
         raise HTTPException(status_code=502, detail="Resposta de autenticação da Pluggy sem apiKey")
+    PLUGGY_API_KEY_CACHE["value"] = api_key
+    PLUGGY_API_KEY_CACHE["expires_at"] = datetime.now() + timedelta(minutes=45)
     return api_key
 
 
@@ -846,6 +861,13 @@ def pluggy_request(path: str, params: Optional[dict] = None, method: str = "GET"
         res = requests.request(method, url, params=params, json=payload, headers=headers, timeout=60)
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"Erro ao chamar Pluggy: {exc}")
+    if res.status_code in (401, 403) and env_value("PLUGGY_CLIENT_ID") and env_value("PLUGGY_CLIENT_SECRET"):
+        PLUGGY_API_KEY_CACHE["value"] = ""
+        headers = {"X-API-KEY": get_pluggy_api_key(force_auth=True)}
+        try:
+            res = requests.request(method, url, params=params, json=payload, headers=headers, timeout=60)
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail=f"Erro ao chamar Pluggy: {exc}")
     if res.status_code >= 400:
         raise HTTPException(status_code=res.status_code, detail=res.text)
     return res.json()
@@ -874,8 +896,8 @@ def configured_pluggy_item_ids(explicit_item_id: Optional[str] = None, explicit_
     if item_ids:
         return list(dict.fromkeys(item_ids))
 
-    item_ids.extend(parse_pluggy_item_ids(os.getenv("PLUGGY_ITEM_IDS", "")))
-    legacy_item_id = os.getenv("PLUGGY_ITEM_ID", "").strip()
+    item_ids.extend(parse_pluggy_item_ids(env_value("PLUGGY_ITEM_IDS")))
+    legacy_item_id = env_value("PLUGGY_ITEM_ID")
     if legacy_item_id:
         item_ids.append(legacy_item_id)
     return list(dict.fromkeys(item_ids))
@@ -1156,8 +1178,13 @@ def sync_pluggy_account_transactions(account_id: str, item_id: Optional[str], da
 @app.get("/api/pluggy/status")
 def pluggy_status():
     item_ids = configured_pluggy_item_ids()
+    api_key = env_value("PLUGGY_API_KEY")
+    client_id = env_value("PLUGGY_CLIENT_ID")
+    client_secret = env_value("PLUGGY_CLIENT_SECRET")
     return {
-        "configured": bool(os.getenv("PLUGGY_API_KEY") or (os.getenv("PLUGGY_CLIENT_ID") and os.getenv("PLUGGY_CLIENT_SECRET"))),
+        "configured": bool(api_key or (client_id and client_secret)),
+        "has_api_key": bool(api_key),
+        "has_client_credentials": bool(client_id and client_secret),
         "has_item_id": bool(item_ids),
         "has_item_ids": bool(item_ids),
         "item_ids_count": len(item_ids),
