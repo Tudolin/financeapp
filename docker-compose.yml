@@ -10,7 +10,8 @@ services:
       - ./backend:/app
       - local_sqlite_data:/app/data
     environment:
-      - DATABASE_URL=sqlite:////app/data/finance.db
+      - DATABASE_URL=${DATABASE_URL:-sqlite:////app/data/finance.db}
+      - AUTH_SECRET=${AUTH_SECRET:-local-dev-secret-change-me}
       - PLUGGY_BASE_URL=${PLUGGY_BASE_URL:-https://api.pluggy.ai}
       - PLUGGY_CLIENT_ID=${PLUGGY_CLIENT_ID:-}
       - PLUGGY_CLIENT_SECRET=${PLUGGY_CLIENT_SECRET:-}

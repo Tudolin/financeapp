@@ -2,12 +2,18 @@
 
 import os
 import re
-import sqlite3
+import db_compat as sqlite3
 import unicodedata
+import base64
+import hashlib
+import hmac
+import json
+import secrets
 import pandas as pd
 import pdfplumber
 import requests
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
@@ -17,20 +23,99 @@ import calendar
 from pydantic import BaseModel
 
 
+def parse_cors_origins() -> List[str]:
+    raw_origins = os.getenv("CORS_ORIGINS") or os.getenv("FRONTEND_URL") or ""
+    origins = [origin.strip().rstrip("/") for origin in raw_origins.split(",") if origin.strip()]
+    return origins or ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+
 app = FastAPI(title="Local Finance API")
 
 # Configuração do CORS para o React acessar
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=parse_cors_origins(),
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    path = request.url.path
+    if not path.startswith("/api") or path in PUBLIC_API_PATHS:
+        return await call_next(request)
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "", 1).strip() if auth_header.startswith("Bearer ") else ""
+    payload = decode_auth_token(token)
+    if not payload:
+        return JSONResponse(status_code=401, content={"detail": "Login necessario"})
+    request.state.user = payload
+    return await call_next(request)
+
 DEFAULT_DB_PATH = "/app/data/finance.db" if os.path.isdir("/app") else os.path.join(os.path.dirname(__file__), "data", "finance.db")
 DB_PATH = os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)
 PLUGGY_BASE_URL = os.getenv("PLUGGY_BASE_URL", "https://api.pluggy.ai").rstrip("/")
+AUTH_SECRET = os.getenv("AUTH_SECRET") or os.getenv("SECRET_KEY") or "local-dev-secret-change-me"
+PUBLIC_API_PATHS = {
+    "/api/health",
+    "/api/auth/status",
+    "/api/auth/login",
+    "/api/auth/register",
+}
+
+
+def password_hash(password: str, salt: Optional[str] = None) -> str:
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120000)
+    return f"{salt}${base64.urlsafe_b64encode(digest).decode('ascii')}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        salt, _ = stored_hash.split("$", 1)
+    except ValueError:
+        return False
+    return hmac.compare_digest(password_hash(password, salt), stored_hash)
+
+
+def token_signature(payload: str) -> str:
+    digest = hmac.new(AUTH_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def create_auth_token(user: dict) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps({
+        "id": user["id"],
+        "email": user["email"],
+    }).encode("utf-8")).decode("ascii").rstrip("=")
+    return f"{payload}.{token_signature(payload)}"
+
+
+def decode_auth_token(token: str) -> Optional[dict]:
+    try:
+        payload, signature = token.split(".", 1)
+        if not hmac.compare_digest(token_signature(payload), signature):
+            return None
+        padded = payload + "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except Exception:
+        return None
+
+
+def users_count() -> int:
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        count = cursor.fetchone()[0] or 0
+        conn.close()
+        return count
+    except Exception:
+        return 0
 
 # Categorias padrão do sistema
 DEFAULT_CATEGORIES = [
@@ -389,6 +474,15 @@ def init_db():
             is_active INTEGER DEFAULT 1
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     
     # Tabela de categorias
     cursor.execute('''
@@ -534,6 +628,8 @@ def init_db():
         cursor.execute("ALTER TABLE cards ADD COLUMN due_day INTEGER NOT NULL DEFAULT 1")
     if 'is_active' not in card_columns:
         cursor.execute("ALTER TABLE cards ADD COLUMN is_active INTEGER DEFAULT 1")
+    if 'created_at' not in card_columns:
+        cursor.execute("ALTER TABLE cards ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP")
 
     repair_card_transaction_signs(cursor)
     
@@ -549,6 +645,10 @@ def startup_event():
     init_db()
 
 # ============ MODELOS PYDANTIC ============
+
+class AuthSchema(BaseModel):
+    email: str
+    password: str
 
 class TransactionSchema(BaseModel):
     date: str
@@ -659,6 +759,55 @@ class CardSchema(BaseModel):
     name: str
     closing_day: int
     due_day: int
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.replace("Bearer ", "", 1).strip() if auth_header.startswith("Bearer ") else ""
+    return {"has_user": users_count() > 0, "authenticated": bool(decode_auth_token(token))}
+
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok"}
+
+
+@app.post("/api/auth/register")
+def auth_register(payload: AuthSchema):
+    email = payload.email.strip().lower()
+    if not email or len(payload.password) < 6:
+        raise HTTPException(status_code=400, detail="Informe email e senha com pelo menos 6 caracteres")
+    if users_count() > 0:
+        raise HTTPException(status_code=403, detail="Usuario inicial ja cadastrado")
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO users (email, password_hash) VALUES (?, ?)",
+        (email, password_hash(payload.password))
+    )
+    conn.commit()
+    cursor.execute("SELECT id, email FROM users WHERE email = ?", (email,))
+    user = dict(cursor.fetchone())
+    conn.close()
+    return {"token": create_auth_token(user), "user": user}
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: AuthSchema):
+    email = payload.email.strip().lower()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, email, password_hash FROM users WHERE email = ?", (email,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row or not verify_password(payload.password, row["password_hash"]):
+        raise HTTPException(status_code=401, detail="Email ou senha invalidos")
+    user = {"id": row["id"], "email": row["email"]}
+    return {"token": create_auth_token(user), "user": user}
 
 
 def get_pluggy_api_key() -> str:
