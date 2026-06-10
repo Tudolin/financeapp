@@ -26,8 +26,7 @@ class HybridRow:
         return self._values[self._index[key]]
 
     def __iter__(self):
-        for column in self._columns:
-            yield column
+        return iter(self._values)
 
     def keys(self):
         return self._columns
